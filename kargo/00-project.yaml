@@ -1,0 +1,166 @@
+# Kargo control-plane objects for this repo: the quickstart pipeline
+# (test -> uat -> prod), plus one extra Stage for demonstrating promotion
+# windows. Apply the whole directory:
+#
+#   kubectl apply -f kargo/
+#
+# The test/uat/prod pipeline promotes by pushing rendered manifests to
+# stage/<name> branches, so it needs Git credentials for the repo below --
+# a Secret in the kargo-demo namespace labelled
+# kargo.akuity.io/cred-type: git. See the Kargo quickstart. The window-demo
+# Stage deliberately needs none.
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Project
+metadata:
+  name: kargo-demo
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Warehouse
+metadata:
+  name: kargo-demo
+  namespace: kargo-demo
+spec:
+  subscriptions:
+  - image:
+      repoURL: public.ecr.aws/nginx/nginx
+      constraint: ^1.29.0
+      discoveryLimit: 5
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: PromotionTask
+metadata:
+  name: demo-promo-process
+  namespace: kargo-demo
+spec:
+  vars:
+  - name: gitopsRepo
+    value: https://github.com/EronWright/kargo-demo.git
+  - name: imageRepo
+    value: public.ecr.aws/nginx/nginx
+  steps:
+  - uses: git-clone
+    config:
+      repoURL: ${{ vars.gitopsRepo }}
+      checkout:
+      - branch: main
+        path: ./src
+      - branch: stage/${{ ctx.stage }}
+        create: true
+        path: ./out
+  - uses: git-clear
+    config:
+      path: ./out
+  - uses: kustomize-set-image
+    as: update
+    config:
+      path: ./src/base
+      images:
+      - image: ${{ vars.imageRepo }}
+        tag: ${{ imageFrom(vars.imageRepo).Tag }}
+  - uses: kustomize-build
+    config:
+      path: ./src/stages/${{ ctx.stage }}
+      outPath: ./out
+  - uses: git-commit
+    as: commit
+    config:
+      path: ./out
+      message: ${{ task.outputs.update.commitMessage }}
+  - uses: git-push
+    config:
+      path: ./out
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: test
+  namespace: kargo-demo
+spec:
+  requestedFreight:
+  - origin:
+      kind: Warehouse
+      name: kargo-demo
+    sources:
+      direct: true
+  promotionTemplate:
+    spec:
+      steps:
+      - task:
+          name: demo-promo-process
+        as: promo-process
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: uat
+  namespace: kargo-demo
+spec:
+  requestedFreight:
+  - origin:
+      kind: Warehouse
+      name: kargo-demo
+    sources:
+      stages:
+      - test
+  promotionTemplate:
+    spec:
+      steps:
+      - task:
+          name: demo-promo-process
+        as: promo-process
+---
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: prod
+  namespace: kargo-demo
+spec:
+  requestedFreight:
+  - origin:
+      kind: Warehouse
+      name: kargo-demo
+    sources:
+      stages:
+      - uat
+  promotionTemplate:
+    spec:
+      steps:
+      - task:
+          name: demo-promo-process
+        as: promo-process
+---
+# A Stage for exercising promotion windows, and nothing else.
+#
+# Windows gate promotions, so demonstrating them needs promotions that
+# actually succeed. The pipeline above cannot: its last step pushes to this
+# repo, so without credentials every Promotion fails and the Stage never gets
+# Freight at all -- there is nothing for a window to hold back.
+#
+# compose-output only rearranges values already in hand. No repository, no
+# registry, no credentials, nothing to time out. The promotion succeeds
+# immediately, and because this Stage declares no spec.verification, Kargo
+# marks the Freight verified on its own -- so one pass leaves it current,
+# verified, and stable, which is the state a window is interesting against.
+#
+# Auto-promotion is enabled for this Stage in 10-projectconfig.yaml, so a
+# closed schedule shows up on its own, with nobody clicking Promote.
+apiVersion: kargo.akuity.io/v1alpha1
+kind: Stage
+metadata:
+  name: window-demo
+  namespace: kargo-demo
+spec:
+  requestedFreight:
+  - origin:
+      kind: Warehouse
+      name: kargo-demo
+    sources:
+      direct: true
+  promotionTemplate:
+    spec:
+      steps:
+      - uses: compose-output
+        as: promoted
+        config:
+          image: ${{ imageFrom("public.ecr.aws/nginx/nginx").Tag }}
+          stage: ${{ ctx.stage }}

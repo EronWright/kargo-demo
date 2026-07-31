@@ -1,0 +1,88 @@
+# Project-level policy for kargo-demo, including promotion windows.
+#
+# Promotion windows are a Kargo Enterprise feature. Kargo OSS accepts the
+# field and ignores it, so this file applies cleanly either way -- on OSS the
+# windows below simply never gate anything.
+#
+# No window is configured by default: an empty schedule gates nothing, and
+# applying this file should not freeze the demo by surprise. Uncomment one of
+# the examples, or freeze window-demo for the next hour right now with:
+#
+#   kubectl patch projectconfig kargo-demo -n kargo-demo --type=merge -p "{\"spec\":{\"promotionWindows\":[{\"name\":\"change-freeze\",\"kind\":\"Deny\",\"dtstart\":\"$(date -u +%Y%m%dT%H%M%SZ)\",\"dtend\":\"$(date -u -v+1H +%Y%m%dT%H%M%SZ)\"}]}}"
+#
+# and lift it again with:
+#
+#   kubectl patch projectconfig kargo-demo -n kargo-demo --type=merge -p '{"spec":{"promotionWindows":null}}'
+#
+# While a window is closed, every promotion of a matching Stage is refused at
+# admission -- automated, manual, and rollback alike -- and Kargo Enterprise
+# reports why on the Stage itself:
+#
+#   kubectl get stage window-demo -n kargo-demo -o jsonpath='{.status.promotionSchedule}'
+#   {"closed":true,"reason":"Promotion freeze \"change-freeze\" is active","nextOpen":"..."}
+apiVersion: kargo.akuity.io/v1alpha1
+kind: ProjectConfig
+metadata:
+  name: kargo-demo
+  namespace: kargo-demo
+spec:
+  promotionPolicies:
+  # Only window-demo promotes on its own. test/uat/prod stay manual, as in the
+  # quickstart -- and auto-promoting them would only pile up failures while the
+  # repo has no Git credentials.
+  - stageSelector:
+      name: window-demo
+    autoPromotionEnabled: true
+
+  promotionWindows: []
+  # A one-shot change freeze. No rrule, so it happens once and then stops
+  # mattering. Times are RFC 5545: YYYYMMDDTHHMMSS, with a trailing Z for UTC.
+  # - name: change-freeze
+  #   kind: Deny
+  #   dtstart: "20260724T170000Z"
+  #   dtend: "20260727T090000Z"
+  #
+  # A recurring nightly freeze, 18:00 to 06:00 the next morning, Pacific time.
+  # The time zone rides inside dtstart as a TZID prefix; there is no separate
+  # field for it. With an rrule, dtend - dtstart is the length of each
+  # occurrence rather than the end of the series.
+  # - name: nightly-freeze
+  #   kind: Deny
+  #   rrule: FREQ=DAILY
+  #   dtstart: "TZID=America/Los_Angeles:20260101T180000"
+  #   dtend: "TZID=America/Los_Angeles:20260102T060000"
+  #
+  # Business hours only, weekdays 09:00-17:00 Pacific. Allow windows invert the
+  # default: as soon as ONE Allow window matches a Stage, that Stage is closed
+  # whenever no Allow window is active. Two consequences worth knowing before
+  # using them -- a Stage is frozen nights and weekends by this single entry,
+  # and a *one-shot* Allow window that has already ended freezes its Stages
+  # forever, because no further occurrence is coming.
+  # - name: business-hours
+  #   kind: Allow
+  #   rrule: FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR
+  #   dtstart: "TZID=America/Los_Angeles:20260105T090000"
+  #   dtend: "TZID=America/Los_Angeles:20260105T170000"
+  #
+  # Windows apply to every Stage in the Project unless a stageSelector narrows
+  # them. The selector matches by exact name, or by glob:/regex: pattern, or by
+  # labels, and name and labels are ANDed when both are given. A Deny window
+  # always wins over an active Allow window.
+  # - name: prod-freeze
+  #   kind: Deny
+  #   dtstart: "20260724T170000Z"
+  #   dtend: "20260727T090000Z"
+  #   stageSelector:
+  #     name: prod
+  # - name: upper-environments-freeze
+  #   kind: Deny
+  #   dtstart: "20260724T170000Z"
+  #   dtend: "20260727T090000Z"
+  #   stageSelector:
+  #     name: "regex:^(uat|prod)$"
+  #     matchLabels:
+  #       tier: restricted
+  #
+  # Cluster-wide windows live on ClusterConfig instead, where a projectSelector
+  # chooses which Projects they cover. A Stage's schedule is the union of the
+  # windows matching it from both places.
